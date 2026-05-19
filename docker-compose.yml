@@ -1,0 +1,13 @@
+services:
+  meshtasticbridge:
+    build: .
+    container_name: meshtasticbridge
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    environment:
+      APP_PORT: ${APP_PORT:-8080}
+      MESHTASTIC_DEVICE: ${MESHTASTIC_DEVICE:-/dev/ttyUSB0}
+      MESHTASTIC_CALLSIGN: ${MESHTASTIC_CALLSIGN:-BRIDGE}
+    devices:
+      - "${MESHTASTIC_DEVICE:-/dev/ttyUSB0}:${MESHTASTIC_DEVICE:-/dev/ttyUSB0}"
