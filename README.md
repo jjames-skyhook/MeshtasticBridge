@@ -6,8 +6,8 @@ Meshtastic radio access is handled through the local `MeshtasticClient.py` wrapp
 
 The service exposes two REST endpoints:
 
-- `POST /chat` sends a TAK GeoChat message, matching the `cot_chat()` flow in `simple_msg_chat_track_working.py`.
-- `POST /track` sends a TAK PLI position update, matching the `run_track()` packet format in `simple_msg_chat_track_working.py`.
+- `POST /chat` sends a TAK GeoChat message.
+- `POST /track` sends a TAK PLI position update.
 
 ## Run locally
 
