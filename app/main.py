@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 from typing import Any
@@ -6,12 +7,32 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from app.MeshtasticClient import MeshtasticClient, MAX_MESHTASTIC_DATA_BYTES
+from app.websocket_messages import broadcaster, router as websocket_router
 
 
 DEFAULT_CALLSIGN = os.getenv("MESHTASTIC_CALLSIGN", "BRIDGE")
 MESHTASTIC_DEVICE = os.getenv("MESHTASTIC_DEVICE") or None
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ACCEPT_BROADCAST_MESSAGES = os.getenv("MESHTASTIC_ACCEPT_BROADCAST", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CONNECT_ON_START = os.getenv("MESHTASTIC_CONNECT_ON_START", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(title="MeshtasticBridge", version="0.1.0")
+app.include_router(websocket_router)
 
 
 class ChatRequest(BaseModel):
@@ -61,18 +82,47 @@ class SendResponse(BaseModel):
 
 
 class MeshtasticTakClient:
-    def __init__(self, device: str | None = None):
+    def __init__(
+        self,
+        device: str | None = None,
+        callsign: str = DEFAULT_CALLSIGN,
+        accept_broadcast: bool = ACCEPT_BROADCAST_MESSAGES,
+    ):
         """Create a Meshtastic client wrapper for an optional serial device path."""
         self.device = device
+        self.callsign = callsign
+        self.accept_broadcast = accept_broadcast
         self._client = None
+        self._last_error = None
         self._lock = threading.Lock()
 
     def meshtastic_client(self) -> MeshtasticClient:
         """Open the MeshtasticClient wrapper on first use and reuse it for later sends."""
         with self._lock:
             if self._client is None:
-                self._client = MeshtasticClient(serial_port=self.device)
+                try:
+                    self._client = MeshtasticClient(
+                        serial_port=self.device,
+                        callsign=self.callsign,
+                        accept_broadcast=self.accept_broadcast,
+                    )
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    raise
+                self._last_error = None
             return self._client
+
+    def connect(self) -> None:
+        """Open the Meshtastic interface so receive subscriptions are active."""
+        self.meshtastic_client()
+
+    @property
+    def connected(self) -> bool:
+        return self._client is not None
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
 
     def close(self) -> None:
         """Close the MeshtasticClient wrapper if it has been opened."""
@@ -91,13 +141,13 @@ class MeshtasticTakClient:
                 sender_callsign=request.sender_callsign,
             )
         except Exception as exc:
-            raise _send_error("CoT chat", exc) from exc
+            raise _send_error("chat", exc) from exc
 
         return SendResponse(
             ok=True,
             port="ATAK_PLUGIN",
             payload_bytes=len(payload),
-            message="sent CoT chat",
+            message=request.message,
         )
 
     def send_track(self, request: TrackRequest) -> SendResponse:
@@ -134,9 +184,17 @@ def _send_error(description: str, exc: Exception) -> HTTPException:
 
 
 @app.get("/health")
-def health() -> dict[str, str | None]:
+def health() -> dict[str, str | bool | None]:
     """Return service health and the configured Meshtastic device path."""
-    return {"status": "ok", "device": MESHTASTIC_DEVICE}
+    return {
+        "status": "ok",
+        "device": MESHTASTIC_DEVICE,
+        "callsign": DEFAULT_CALLSIGN,
+        "accept_broadcast": ACCEPT_BROADCAST_MESSAGES,
+        "connect_on_start": CONNECT_ON_START,
+        "radio_connected": client.connected,
+        "radio_error": client.last_error,
+    }
 
 
 @app.post("/chat", response_model=SendResponse)
@@ -151,7 +209,19 @@ def track(request: TrackRequest) -> SendResponse:
     return client.send_track(request)
 
 
+@app.on_event("startup")
+async def startup() -> None:
+    """Start websocket fanout for received chat messages."""
+    broadcaster.start()
+    if CONNECT_ON_START:
+        try:
+            client.connect()
+        except Exception:
+            pass
+
+
 @app.on_event("shutdown")
-def shutdown() -> None:
+async def shutdown() -> None:
     """Release the Meshtastic serial interface during application shutdown."""
+    await broadcaster.stop()
     client.close()

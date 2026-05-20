@@ -4,10 +4,11 @@ Dockerized REST client for sending Meshtastic ATAK Plugin packets.
 
 Meshtastic radio access is handled through the local `MeshtasticClient.py` wrapper class, which wraps the Meshtastic Python library.
 
-The service exposes two REST endpoints:
+The service exposes two REST endpoints and one websocket endpoint:
 
 - `POST /chat` sends a TAK GeoChat message.
-- `POST /track` sends a TAK PLI position update.
+- `POST /track` sends a TAK PLI position update, matching the `run_track()` packet format in `simple_msg_chat_track_working.py`.
+- `WS /ws/chat` streams received `ATAK_PLUGIN` and `TEXT_MESSAGE_APP` chat messages as JSON.
 
 ## Run locally
 
@@ -26,6 +27,9 @@ Set the serial device for your Meshtastic radio, then build and start:
 ```bash
 export MESHTASTIC_DEVICE=/dev/ttyUSB0
 export MESHTASTIC_CALLSIGN=BRIDGE
+export MESHTASTIC_ACCEPT_BROADCAST=true
+export MESHTASTIC_CONNECT_ON_START=true
+export LOG_LEVEL=INFO
 export APP_PORT=8080
 docker compose up --build
 ```
@@ -65,3 +69,32 @@ curl -X POST http://localhost:8080/track \
 ```
 
 `/track` accepts either `latitude`/`longitude`/`altitude` or `lat`/`lon`/`alt`.
+
+## Websocket receive stream
+
+Received `ATAK_PLUGIN` and `TEXT_MESSAGE_APP` chat packets are accepted only when addressed to `MESHTASTIC_CALLSIGN`.
+When `MESHTASTIC_ACCEPT_BROADCAST=true`, common broadcast/group targets such as `All Chat Rooms` are also accepted.
+The radio interface opens on application startup by default so receive subscriptions are active before the first REST send.
+Set `MESHTASTIC_CONNECT_ON_START=false` to keep the older lazy-connect behavior.
+Receive logs include Meshtastic packet `from`, `fromId`, `to`, `toId`, decoded destination, parsed ATAK chat recipient fields, and the local target ids used for filtering.
+
+Connect one or more websocket clients:
+
+```bash
+websocat ws://localhost:8080/ws/chat
+```
+
+Each received chat message is sent to every connected websocket client:
+
+```json
+{
+  "source_port": "ATAK_PLUGIN",
+  "message": "hello from radio",
+  "sender": "SENDER",
+  "recipient": "All Chat Rooms",
+  "to_callsign": "All Chat Rooms",
+  "from_id": "!12345678",
+  "to_id": "^all",
+  "received_at": "2026-05-19T12:00:00+00:00"
+}
+```
