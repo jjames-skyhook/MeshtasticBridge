@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
-from app.MeshtasticClient import MeshtasticClient, MAX_MESHTASTIC_DATA_BYTES
+from app.meshtastic_client import MeshtasticClient, MAX_MESHTASTIC_DATA_BYTES
 from app.websocket_messages import broadcaster, router as websocket_router
 
 
