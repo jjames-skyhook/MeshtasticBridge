@@ -1,9 +1,10 @@
 import logging
 import os
+import sys
 import threading
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from app.meshtastic_client import MeshtasticClient, MAX_MESHTASTIC_DATA_BYTES
@@ -74,10 +75,46 @@ class TrackRequest(BaseModel):
         return self
 
 
+class BridgeConfig(BaseModel):
+    callsign: str = Field(default=DEFAULT_CALLSIGN, min_length=1, max_length=40)
+    serialport: str | None = Field(default=MESHTASTIC_DEVICE, max_length=255)
+    enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_config_aliases(cls, data: Any) -> Any:
+        """Accept common serial/enabled aliases while returning one stable shape."""
+        if isinstance(data, dict):
+            normalized = dict(data)
+            if "serialport" not in normalized:
+                if "serial_port" in normalized:
+                    normalized["serialport"] = normalized["serial_port"]
+                elif "device" in normalized:
+                    normalized["serialport"] = normalized["device"]
+            if "enabled" not in normalized and "enabeled" in normalized:
+                normalized["enabled"] = normalized["enabeled"]
+            if normalized.get("serialport") == "":
+                normalized["serialport"] = None
+            return normalized
+        return data
+
+
 class SendResponse(BaseModel):
     ok: bool
     port: str
     payload_bytes: int
+    message: str
+
+
+class BridgeConfigResponse(BridgeConfig):
+    radio_connected: bool
+    radio_error: str | None
+    changed: bool = False
+
+
+class ExitResponse(BaseModel):
+    ok: bool
+    exit_code: int
     message: str
 
 
@@ -87,11 +124,13 @@ class MeshtasticTakClient:
         device: str | None = None,
         callsign: str = DEFAULT_CALLSIGN,
         accept_broadcast: bool = ACCEPT_BROADCAST_MESSAGES,
+        enabled: bool = True,
     ):
         """Create a Meshtastic client wrapper for an optional serial device path."""
         self.device = device
         self.callsign = callsign
         self.accept_broadcast = accept_broadcast
+        self.enabled = enabled
         self._client = None
         self._last_error = None
         self._lock = threading.Lock()
@@ -114,6 +153,8 @@ class MeshtasticTakClient:
 
     def connect(self) -> None:
         """Open the Meshtastic interface so receive subscriptions are active."""
+        if not self.enabled:
+            return
         self.meshtastic_client()
 
     @property
@@ -131,8 +172,43 @@ class MeshtasticTakClient:
                 self._client.close()
                 self._client = None
 
+    def config(self) -> BridgeConfig:
+        """Return the active bridge configuration."""
+        with self._lock:
+            return BridgeConfig(
+                callsign=self.callsign,
+                serialport=self.device,
+                enabled=self.enabled,
+            )
+
+    def configure(self, config: BridgeConfig, connect_when_enabled: bool = True) -> bool:
+        """Apply a runtime config and reconnect when serial/callsign settings change."""
+        with self._lock:
+            changed = (
+                self.callsign != config.callsign
+                or self.device != config.serialport
+                or self.enabled != config.enabled
+            )
+            if not changed:
+                should_connect = config.enabled and connect_when_enabled and self._client is None
+            else:
+                if self._client is not None:
+                    self._client.close()
+                    self._client = None
+                self.callsign = config.callsign
+                self.device = config.serialport
+                self.enabled = config.enabled
+                self._last_error = None
+                should_connect = config.enabled and connect_when_enabled
+
+        if should_connect:
+            self.connect()
+        return changed
+
     def send_chat(self, request: ChatRequest) -> SendResponse:
         """Send a REST chat request through the MeshtasticClient wrapper."""
+        if not self.enabled:
+            raise HTTPException(status_code=503, detail="bridge is disabled")
         try:
             payload = self.meshtastic_client().send_chat_message(
                 message=request.message,
@@ -152,6 +228,8 @@ class MeshtasticTakClient:
 
     def send_track(self, request: TrackRequest) -> SendResponse:
         """Send a REST track request through the MeshtasticClient wrapper."""
+        if not self.enabled:
+            raise HTTPException(status_code=503, detail="bridge is disabled")
         try:
             payload = self.meshtastic_client().send_location_info(
                 callsign=request.callsign,
@@ -173,7 +251,7 @@ class MeshtasticTakClient:
         )
 
 
-client = MeshtasticTakClient(MESHTASTIC_DEVICE)
+client = MeshtasticTakClient(MESHTASTIC_DEVICE, DEFAULT_CALLSIGN, enabled=True)
 
 
 def _send_error(description: str, exc: Exception) -> HTTPException:
@@ -183,18 +261,68 @@ def _send_error(description: str, exc: Exception) -> HTTPException:
     return HTTPException(status_code=503, detail=f"failed to send {description}: {exc}")
 
 
+def _config_response(changed: bool = False) -> BridgeConfigResponse:
+    config = client.config()
+    return BridgeConfigResponse(
+        callsign=config.callsign,
+        serialport=config.serialport,
+        enabled=config.enabled,
+        radio_connected=client.connected,
+        radio_error=client.last_error,
+        changed=changed,
+    )
+
+
+def _exit_process(exit_code: int) -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
+
+
 @app.get("/health")
 def health() -> dict[str, str | bool | None]:
     """Return service health and the configured Meshtastic device path."""
+    config = client.config()
     return {
         "status": "ok",
-        "device": MESHTASTIC_DEVICE,
-        "callsign": DEFAULT_CALLSIGN,
+        "device": config.serialport,
+        "callsign": config.callsign,
+        "enabled": config.enabled,
         "accept_broadcast": ACCEPT_BROADCAST_MESSAGES,
         "connect_on_start": CONNECT_ON_START,
         "radio_connected": client.connected,
         "radio_error": client.last_error,
     }
+
+
+@app.get("/config", response_model=BridgeConfigResponse)
+def get_config() -> BridgeConfigResponse:
+    """Return the active bridge config."""
+    return _config_response()
+
+
+@app.post("/config", response_model=BridgeConfigResponse)
+def config(request: BridgeConfig) -> BridgeConfigResponse:
+    """Apply bridge config and reinitialize Meshtastic when settings differ."""
+    try:
+        changed = client.configure(request)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"failed to apply config: {exc}") from exc
+    return _config_response(changed=changed)
+
+
+@app.post("/restart", response_model=ExitResponse)
+def restart(background_tasks: BackgroundTasks) -> ExitResponse:
+    """Exit with a non-zero code so Docker on-failure policies restart the app."""
+    background_tasks.add_task(_exit_process, 1)
+    return ExitResponse(ok=True, exit_code=1, message="restarting")
+
+
+@app.post("/shutdown", response_model=ExitResponse)
+def shutdown_app(background_tasks: BackgroundTasks) -> ExitResponse:
+    """Exit with code 0 so Docker on-failure policies do not restart the app."""
+    background_tasks.add_task(_exit_process, 0)
+    return ExitResponse(ok=True, exit_code=0, message="shutting down")
 
 
 @app.post("/chat", response_model=SendResponse)
