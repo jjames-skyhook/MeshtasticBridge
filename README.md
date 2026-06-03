@@ -7,7 +7,7 @@ Meshtastic radio access is handled through the local `MeshtasticClient.py` wrapp
 The service exposes five REST endpoints and one websocket endpoint:
 
 - `POST /chat` sends a TAK GeoChat message.
-- `POST /track` sends a TAK PLI position update, matching the `run_track()` packet format in `simple_msg_chat_track_working.py`.
+- `POST /track` sends a TAK PLI position update, matching the `run_track()` packet format.
 - `GET /config` returns the current bridge config.
 - `POST /config` updates the bridge config and reconnects Meshtastic when the config changes.
 - `POST /restart` exits with code `1` so Docker can restart the app.
