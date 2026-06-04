@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/env.sh"
+
+cd "$PROJECT_ROOT"
+
+docker build -t "$DOCKER_IMAGE" .
+docker rm -f "$DOCKER_CONTAINER" 2>/dev/null || true
+
+set -x
+
+exec docker run --name "$DOCKER_CONTAINER" \
+  --restart on-failure \
+  --device "$MESHTASTIC_DEVICE_IN_HOST:$MESHTASTIC_DEVICE_IN_DOCKER" \
+  -p "$APP_PORT:$APP_PORT" \
+  -e APP_PORT="$APP_PORT" \
+  -e MESHTASTIC_DEVICE="$MESHTASTIC_DEVICE_IN_DOCKER" \
+  -e MESHTASTIC_CALLSIGN="$MESHTASTIC_CALLSIGN" \
+  -e MESHTASTIC_ACCEPT_BROADCAST="$MESHTASTIC_ACCEPT_BROADCAST" \
+  -e MESHTASTIC_CONNECT_ON_START="$MESHTASTIC_CONNECT_ON_START" \
+  -e MESHTASTIC_CONNECT_TIMEOUT="$MESHTASTIC_CONNECT_TIMEOUT" \
+  -e LOG_LEVEL="$LOG_LEVEL" \
+  "$DOCKER_IMAGE"
+set +x
