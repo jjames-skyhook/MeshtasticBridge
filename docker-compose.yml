@@ -4,9 +4,9 @@ services:
     container_name: meshtasticbridge
     restart: on-failure
     ports:
-      - "${APP_PORT:-8090}:${APP_PORT:-8000}"
+      - "${APP_PORT:-8090}:${APP_PORT:-8090}"
     environment:
-      APP_PORT: ${APP_PORT:-8080}
+      APP_PORT: ${APP_PORT:-8090}
       MESHTASTIC_DEVICE: ${MESHTASTIC_DEVICE:-/dev/ttyUSB0}
       MESHTASTIC_CALLSIGN: ${MESHTASTIC_CALLSIGN:-BRIDGE}
       MESHTASTIC_ACCEPT_BROADCAST: ${MESHTASTIC_ACCEPT_BROADCAST:-true}
