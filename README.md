@@ -20,7 +20,7 @@ The service exposes five REST endpoints and one websocket endpoint:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-export APP_PORT=8080
+export APP_PORT=8090
 uvicorn app.main:app --host 0.0.0.0 --port "$APP_PORT"
 ```
 
@@ -41,7 +41,7 @@ export MESHTASTIC_ACCEPT_BROADCAST=true
 export MESHTASTIC_CONNECT_ON_START=true
 export MESHTASTIC_CONNECT_TIMEOUT=300
 export LOG_LEVEL=INFO
-export APP_PORT=8080
+export APP_PORT=8090
 docker compose up --build
 ```
 
@@ -67,8 +67,8 @@ docker build -t meshtasticbridge .
 docker run --name meshtasticbridge \
   --restart on-failure \
   --device "$MESHTASTIC_DEVICE:$MESHTASTIC_DEVICE" \
-  -p "${APP_PORT:-8080}:${APP_PORT:-8080}" \
-  -e APP_PORT="${APP_PORT:-8080}" \
+  -p "${APP_PORT:-8090}:${APP_PORT:-8090}" \
+  -e APP_PORT="${APP_PORT:-8090}" \
   -e MESHTASTIC_DEVICE="$MESHTASTIC_DEVICE" \
   -e MESHTASTIC_CALLSIGN="${MESHTASTIC_CALLSIGN:-BRIDGE}" \
   -e MESHTASTIC_ACCEPT_BROADCAST="${MESHTASTIC_ACCEPT_BROADCAST:-true}" \
@@ -85,7 +85,7 @@ Run the service directly on macOS, or expose the radio over TCP/USB from a Linux
 
 The bridge is configured with environment variables:
 
-- `APP_PORT` sets the HTTP port. Default: `8080`.
+- `APP_PORT` sets the HTTP port. Default: `8090`.
 - `MESHTASTIC_DEVICE` sets the serial device path. Default: `/dev/ttyUSB0` in Docker, auto-detect when unset locally.
 - `MESHTASTIC_CALLSIGN` sets the local callsign used for sends and receive filtering. Default: `BRIDGE`.
 - `MESHTASTIC_ACCEPT_BROADCAST` allows common broadcast/group receive targets. Default: `true`.
@@ -109,7 +109,7 @@ Every REST request is logged at `INFO`. With `LOG_LEVEL=DEBUG`, logs also includ
 Send a chat message:
 
 ```bash
-curl -X POST http://localhost:8080/chat \
+curl -X POST http://localhost:8090/chat \
   -H 'Content-Type: application/json' \
   -d '{
     "message": "hello from REST",
@@ -122,7 +122,7 @@ curl -X POST http://localhost:8080/chat \
 Send a track update:
 
 ```bash
-curl -X POST http://localhost:8080/track \
+curl -X POST http://localhost:8090/track \
   -H 'Content-Type: application/json' \
   -d '{
     "callsign": "DRONE-1",
@@ -144,13 +144,13 @@ It also accepts `color` as an alias for `team`; values such as `cyan`, `green`,
 Get the active bridge config:
 
 ```bash
-curl http://localhost:8080/config
+curl http://localhost:8090/config
 ```
 
 Update the bridge config:
 
 ```bash
-curl -X POST http://localhost:8080/config \
+curl -X POST http://localhost:8090/config \
   -H 'Content-Type: application/json' \
   -d '{
     "callsign": "SNAP",
@@ -164,7 +164,7 @@ If the new config differs from the active config, the service closes the current
 Restart through Docker:
 
 ```bash
-curl -X POST http://localhost:8080/restart
+curl -X POST http://localhost:8090/restart
 ```
 
 The process exits with code `1`, which restarts the container when it was launched with `--restart on-failure` or `restart: on-failure`.
@@ -172,7 +172,7 @@ The process exits with code `1`, which restarts the container when it was launch
 Shutdown without Docker restart:
 
 ```bash
-curl -X POST http://localhost:8080/shutdown
+curl -X POST http://localhost:8090/shutdown
 ```
 
 The process exits with code `0`, so an `on-failure` restart policy leaves the container stopped.
@@ -188,7 +188,7 @@ Receive logs include Meshtastic packet `from`, `fromId`, `to`, `toId`, decoded d
 Connect one or more websocket clients:
 
 ```bash
-websocat ws://localhost:8080/ws/chat
+websocat ws://localhost:8090/ws/chat
 ```
 
 Each received chat message is sent to every connected websocket client:
