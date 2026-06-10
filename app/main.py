@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.meshtastic_client import (
@@ -33,6 +33,7 @@ CONNECT_ON_START = os.getenv("MESHTASTIC_CONNECT_ON_START", "true").lower() in {
     "on",
 }
 MESHTASTIC_CONNECT_TIMEOUT = int(os.getenv("MESHTASTIC_CONNECT_TIMEOUT", "300"))
+MESHTASTIC_RECONNECT_INTERVAL = float(os.getenv("MESHTASTIC_RECONNECT_INTERVAL", "30"))
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -42,6 +43,18 @@ logging.basicConfig(
 app = FastAPI(title="MeshtasticBridge", version="0.1.0")
 app.include_router(websocket_router)
 logger = logging.getLogger(__name__)
+
+
+@app.middleware("http")
+async def log_rest_request(request: Request, call_next):
+    client_address = request.client.host if request.client else "unknown"
+    logger.info(
+        "REST request received method=%s path=%s client=%s",
+        request.method,
+        request.url.path,
+        client_address,
+    )
+    return await call_next(request)
 
 
 class ChatRequest(BaseModel):
@@ -148,6 +161,7 @@ class MeshtasticTakClient:
         accept_broadcast: bool = ACCEPT_BROADCAST_MESSAGES,
         enabled: bool = True,
         connect_timeout: int = MESHTASTIC_CONNECT_TIMEOUT,
+        reconnect_interval: float = MESHTASTIC_RECONNECT_INTERVAL,
     ):
         """Create a Meshtastic client wrapper for an optional serial device path."""
         self.device = device
@@ -155,10 +169,14 @@ class MeshtasticTakClient:
         self.accept_broadcast = accept_broadcast
         self.enabled = enabled
         self.connect_timeout = connect_timeout
+        self.reconnect_interval = reconnect_interval
         self._client = None
         self._last_error = None
         self._lock = threading.Lock()
         self._operation_lock = threading.Lock()
+        self._stop_reconnect = threading.Event()
+        self._reconnect_now = threading.Event()
+        self._reconnect_thread: threading.Thread | None = None
 
     def meshtastic_client(self) -> MeshtasticClient:
         """Open the MeshtasticClient wrapper on first use and reuse it for later sends."""
@@ -186,21 +204,21 @@ class MeshtasticTakClient:
                         timeout=self.connect_timeout,
                         callsign=self.callsign,
                         accept_broadcast=self.accept_broadcast,
+                        on_connection_lost=self._connection_lost,
                     )
                 except Exception as exc:
                     self._last_error = str(exc)
-                    logger.error(
-                        "failed to connect to Meshtastic unit device=%s callsign=%s elapsed=%.2fs error=%s",
+                    logger.warning(
+                        "Meshtastic connection failed device=%s callsign=%s elapsed=%.2fs error=%s",
                         self.device or "auto-detect",
                         self.callsign,
                         time.monotonic() - started_at,
                         exc,
-                        exc_info=True,
                     )
                     raise
                 self._last_error = None
-                logger.debug(
-                    "Meshtastic connection opened device=%s callsign=%s elapsed=%.2fs",
+                logger.info(
+                    "Meshtastic connected device=%s callsign=%s elapsed=%.2fs",
                     self.device or "auto-detect",
                     self.callsign,
                     time.monotonic() - started_at,
@@ -221,6 +239,49 @@ class MeshtasticTakClient:
             return
         self.meshtastic_client()
 
+    def start_reconnect_worker(self) -> None:
+        """Start the background connection/reconnection loop."""
+        with self._lock:
+            if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
+                self._reconnect_now.set()
+                return
+            self._stop_reconnect.clear()
+            self._reconnect_now.set()
+            reconnect_thread = threading.Thread(
+                target=self._reconnect_loop,
+                name="meshtastic-reconnect-worker",
+                daemon=True,
+            )
+            self._reconnect_thread = reconnect_thread
+        reconnect_thread.start()
+
+    def _reconnect_loop(self) -> None:
+        while not self._stop_reconnect.is_set():
+            self._reconnect_now.clear()
+            if self.enabled and not self.connected:
+                try:
+                    self.connect()
+                except Exception:
+                    pass
+            self._reconnect_now.wait(self.reconnect_interval)
+
+    def _connection_lost(self, disconnected_client: MeshtasticClient) -> None:
+        with self._lock:
+            if self._client is not disconnected_client:
+                return
+            self._client = None
+            self._last_error = "Meshtastic serial connection lost"
+        logger.warning(
+            "Meshtastic disconnected device=%s callsign=%s; reconnecting",
+            self.device or "auto-detect",
+            self.callsign,
+        )
+        try:
+            disconnected_client.close()
+        except Exception as exc:
+            logger.debug("failed to clean up disconnected Meshtastic client: %s", exc)
+        self._reconnect_now.set()
+
     @property
     def connected(self) -> bool:
         return self._client is not None
@@ -231,6 +292,12 @@ class MeshtasticTakClient:
 
     def close(self) -> None:
         """Close the MeshtasticClient wrapper if it has been opened."""
+        self._stop_reconnect.set()
+        self._reconnect_now.set()
+        reconnect_thread = self._reconnect_thread
+        if reconnect_thread is not None and reconnect_thread is not threading.current_thread():
+            reconnect_thread.join(timeout=max(2, self.connect_timeout + 1))
+        self._reconnect_thread = None
         wait_started_at = time.monotonic()
         if self._operation_lock.locked():
             logger.info("waiting for in-flight Meshtastic operation before close")
@@ -299,6 +366,8 @@ class MeshtasticTakClient:
 
             if should_connect:
                 self.connect()
+            elif config.enabled:
+                self._reconnect_now.set()
         return changed
 
     def send_chat(self, request: ChatRequest) -> SendResponse:
@@ -455,6 +524,7 @@ def health() -> dict[str, str | bool | int | None]:
         "accept_broadcast": ACCEPT_BROADCAST_MESSAGES,
         "connect_on_start": CONNECT_ON_START,
         "connect_timeout": MESHTASTIC_CONNECT_TIMEOUT,
+        "reconnect_interval": MESHTASTIC_RECONNECT_INTERVAL,
         "radio_connected": client.connected,
         "radio_error": client.last_error,
     }
@@ -507,11 +577,11 @@ async def startup() -> None:
     """Start websocket fanout for received chat messages."""
     broadcaster.start()
     if CONNECT_ON_START:
-        try:
-            logger.debug("startup Meshtastic connection enabled")
-            client.connect()
-        except Exception as exc:
-            logger.error("startup failed to connect to Meshtastic unit: %s", exc, exc_info=True)
+        logger.info(
+            "Meshtastic reconnect worker starting interval=%ss",
+            MESHTASTIC_RECONNECT_INTERVAL,
+        )
+        client.start_reconnect_worker()
     else:
         logger.debug("startup Meshtastic connection disabled by MESHTASTIC_CONNECT_ON_START")
 

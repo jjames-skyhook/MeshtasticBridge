@@ -91,17 +91,18 @@ The bridge is configured with environment variables:
 - `MESHTASTIC_ACCEPT_BROADCAST` allows common broadcast/group receive targets. Default: `true`.
 - `MESHTASTIC_CONNECT_ON_START` opens the Meshtastic radio during app startup. Default: `true`.
 - `MESHTASTIC_CONNECT_TIMEOUT` controls the Meshtastic serial open timeout in seconds. Default: `300`.
-- `LOG_LEVEL` controls Python logging. Default: `INFO`; use `DEBUG` for REST, serial connection, and radio send traces.
+- `MESHTASTIC_RECONNECT_INTERVAL` controls the delay between failed connection attempts. Default: `30` seconds.
+- `LOG_LEVEL` controls Python logging. Default: `INFO`; use `DEBUG` for serial and radio send traces.
 
 Connection behavior:
 
-- When `MESHTASTIC_CONNECT_ON_START=true`, startup attempts to connect to the Meshtastic unit immediately.
+- When `MESHTASTIC_CONNECT_ON_START=true`, a background worker attempts to connect immediately and retries every `MESHTASTIC_RECONNECT_INTERVAL` seconds after failures or disconnections.
 - When `MESHTASTIC_CONNECT_ON_START=false`, the first `/chat`, `/track`, or enabled `/config` request opens the connection lazily.
-- If the Meshtastic unit cannot be opened, the service logs an error with the serial device, callsign, elapsed time, timeout context, and traceback.
+- Failed connection attempts produce one warning line. A successful connection produces one info line.
 - REST requests that cannot connect or send return `503` with the Meshtastic error in the response detail.
 - `/health` and `/config` include `radio_connected` and `radio_error` so clients can see the current radio state.
 
-With `LOG_LEVEL=DEBUG`, logs include REST send requests, lazy connection attempts, serial open timing, successful payload sends, radio send wait/send timing, and receive filtering details. Slow REST sends or radio writes at or above five seconds are logged at `WARNING`; queued sends and close/reconfigure waits are logged at `INFO`.
+Every REST request is logged at `INFO`. With `LOG_LEVEL=DEBUG`, logs also include serial open timing, successful payload sends, radio send wait/send timing, and receive filtering details. Slow REST sends or radio writes at or above five seconds are logged at `WARNING`; queued sends and close/reconfigure waits are logged at `INFO`.
 
 ## REST examples
 

@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from queue import Empty, Queue
+from collections.abc import Callable
 from typing import Optional
 
 import meshtastic.serial_interface
@@ -116,6 +117,7 @@ class MeshtasticClient:
         timeout: int = 300,
         callsign: str = "BRIDGE",
         accept_broadcast: bool = True,
+        on_connection_lost: Callable[["MeshtasticClient"], None] | None = None,
     ):
         """Connect to a Meshtastic device.
 
@@ -129,6 +131,7 @@ class MeshtasticClient:
         self.serial_port = serial_port
         self.callsign = callsign
         self.accept_broadcast = accept_broadcast
+        self._on_connection_lost_callback = on_connection_lost
         self._send_lock = threading.Lock()
         self._receive_packets = Queue()
         self._stop_receive_worker = threading.Event()
@@ -149,13 +152,12 @@ class MeshtasticClient:
                 timeout=timeout,
             )
         except Exception as exc:
-            logger.error(
+            logger.debug(
                 "failed to create Meshtastic SerialInterface devPath=%s timeout=%ss elapsed=%.2fs error=%s",
                 serial_port or "auto-detect",
                 timeout,
                 time.monotonic() - started_at,
                 exc,
-                exc_info=True,
             )
             raise
         logger.debug(
@@ -165,8 +167,16 @@ class MeshtasticClient:
         )
         self._receive_handler = self._on_receive
         pub.subscribe(self._receive_handler, "meshtastic.receive")
+        pub.subscribe(self._connection_lost, "meshtastic.connection.lost")
         self._receive_worker.start()
         logger.debug("started Meshtastic receive worker callsign=%s", self.callsign)
+
+    def _connection_lost(self, interface) -> None:
+        if interface is not self.interface:
+            return
+        callback = self._on_connection_lost_callback
+        if callback is not None:
+            callback(self)
 
     def _on_receive(self, packet, interface):
         self._receive_packets.put((packet, interface))
@@ -361,6 +371,7 @@ class MeshtasticClient:
             self.serial_port or "auto-detect",
         )
         pub.unsubscribe(self._receive_handler, "meshtastic.receive")
+        pub.unsubscribe(self._connection_lost, "meshtastic.connection.lost")
         self._stop_receive_worker.set()
         self._receive_worker.join(timeout=2)
         with self._send_lock:
